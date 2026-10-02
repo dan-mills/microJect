@@ -6,11 +6,10 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-
 embassy-stm32 = { version = "0.6.0", path = "../embassy/embassy-stm32", features = [ "unstable-pac", "stm32f030k6", "memory-x", "exti", "chrono", "defmt", "time-driver-any"]  }
 embassy-sync = { version = "0.8.0", path = "../embassy/embassy-sync", features = ["portable-atomic", "defmt"] }
 embassy-executor = { version = "0.10.0", path = "../embassy/embassy-executor", features = ["platform-cortex-m", "executor-thread","defmt"] }
-embassy-time = { version = "0.5.1", path = "../embassy/embassy-time", features = [ "defmt-timestamp-uptime", "tick-hz-10_000","defmt" ] }
+embassy-time = { version = "0.5.1", path = "../embassy/embassy-time", features = ["tick-hz-10_000","defmt" ] }
 embassy-embedded-hal = { version = "0.6.0", path = "../embassy/embassy-embedded-hal" }
 embassy-futures = { version = "0.1.2", path = "../embassy/embassy-futures" }
 embedded-io-async = { version = "0.7.0" }
@@ -38,7 +37,13 @@ micromath = "2.0.0"
 
 
 [profile.release]
-debug = 0
+debug = 2
+codegen-units = 1
+debug-assertions = true
+incremental = false
+lto = 'fat'
+opt-level = 's'
+overflow-checks = true
 
 [package.metadata.embassy]
 build = [
