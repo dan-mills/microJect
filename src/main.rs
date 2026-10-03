@@ -348,6 +348,8 @@ async fn modbus_task(
     baudrate: u32,
     manual_control: bool,
     mut usart1: Uart<'static, Async>,
+    mut modbus_data_led: Output<'static>,
+    mut modbus_err_led: Output<'static>,
 ) {
     //async fn modbus_task(address: u8, baudrate: u32, p: embassy_stm32::Peripherals) {
     // 11 bits in a serial byte (start + 8 data + parity + stop)
@@ -380,12 +382,15 @@ async fn modbus_task(
             }
             Err(_) => {}
         }
-        if Instant::now() - last_message > timeout_idle && !manual_control {
-            // Reset coil data if no message received for idle timeout thus stopping pulse generation
-            COIL_DATA[0].store(false, Relaxed);
-            COIL_DATA[1].store(false, Relaxed);
-            COIL_DATA[2].store(false, Relaxed);
-            COIL_DATA[3].store(false, Relaxed);
+        if Instant::now() - last_message > timeout_idle {
+            modbus_data_led.set_low();
+            if !manual_control {
+                // Reset coil data if no message received for idle timeout thus stopping pulse generation
+                COIL_DATA[0].store(false, Relaxed);
+                COIL_DATA[1].store(false, Relaxed);
+                COIL_DATA[2].store(false, Relaxed);
+                COIL_DATA[3].store(false, Relaxed);
+            }
         }
         match state {
             ModbusState::WaitForIdle3_5 => {
@@ -403,6 +408,7 @@ async fn modbus_task(
                             defmt::trace!("Modbus state changed to Idle");
                         } else {
                             defmt::debug!("read error: {:?}", e);
+                            modbus_err_led.set_high();
                             bytes_received = 0;
                         }
                     }
@@ -436,6 +442,7 @@ async fn modbus_task(
                         if e != embassy_time::TimeoutError {
                             // Any error except a timeout puts us back into the wait for gap state
                             defmt::debug!("read error: {:?}", e);
+                            modbus_err_led.set_high();
                             serial_timeout = timeout3_5;
                             state = ModbusState::WaitForIdle3_5;
                         }
@@ -452,6 +459,7 @@ async fn modbus_task(
                             serial_timeout = timeout3_5;
                             bytes_received = 0;
                             state = ModbusState::WaitForIdle3_5;
+                            modbus_err_led.set_high();
                             break;
                         }
                     }
@@ -468,6 +476,7 @@ async fn modbus_task(
                                     && (crc.0 == serial_data[bytes_received - 1])
                                 {
                                     defmt::trace!("CRC OK");
+                                    modbus_data_led.toggle();
                                     let opcode = serial_data[1];
                                     let resultcode: Result<usize, u8>;
                                     //let mut resultcode = 0x00; // set non zero if we are going to return an exception
@@ -524,6 +533,7 @@ async fn modbus_task(
                                     match resultcode {
                                         Ok(length) => {
                                             response_bytes = length;
+                                            modbus_err_led.set_low();
                                         }
                                         Err(code) => {
                                             // send the exception response
@@ -531,6 +541,7 @@ async fn modbus_task(
                                             serial_data[1] |= 0x80; // Mark this as an exception
                                             serial_data[2] = code;
                                             response_bytes = 3;
+                                            modbus_err_led.set_high();
                                         }
                                     }
                                     let crc = crc16(&serial_data[..response_bytes as usize]);
@@ -542,6 +553,7 @@ async fn modbus_task(
                                     }
                                 } else {
                                     defmt::debug!("CRC fail");
+                                    modbus_err_led.set_high();
                                     defmt::trace!("Modbus state changed to Wait for Idle3_5");
                                 }
                             }
@@ -550,6 +562,7 @@ async fn modbus_task(
                             state = ModbusState::WaitForIdle3_5;
                         } else {
                             defmt::debug!("read error: {:?}", e);
+                            modbus_err_led.set_high();
                             serial_timeout = timeout3_5;
                             state = ModbusState::WaitForIdle3_5;
                             defmt::trace!("Modbus state changed to Idle3_5");
@@ -628,9 +641,9 @@ async fn main(spawner: Spawner) {
         defmt::info!("Overriding modbus input with local inputs");
     }
 
-    let led1 = Output::new(p.PB3, Level::High, Speed::Low);
-    let led2 = Output::new(p.PB4, Level::High, Speed::Low);
-    let led3 = Output::new(p.PB5, Level::High, Speed::Low);
+    let mut led1 = Output::new(p.PB3, Level::High, Speed::Low);
+    let mut led2 = Output::new(p.PB4, Level::High, Speed::Low);
+    let mut led3 = Output::new(p.PB5, Level::High, Speed::Low);
 
     let ch1_pin = PwmPin::new(p.PA7, OutputType::PushPull);
     let mut pwm1 = SimplePwm::new(
@@ -692,7 +705,7 @@ async fn main(spawner: Spawner) {
         .unwrap(),
     );
     // Kick off the modbus interface task
-    spawner.spawn(modbus_task(modbus_address, baud, sw1.is_low(), usart).unwrap());
+    spawner.spawn(modbus_task(modbus_address, baud, sw1.is_low(), usart, led2, led3).unwrap());
 
     let mut old_dutycycles = [0u16; 3];
     loop {
@@ -797,6 +810,7 @@ async fn main(spawner: Spawner) {
                 pwm3.ch1().disable();
             }
         }
+        led1.toggle(); // CPU Running indicator
         Timer::after(Duration::from_millis(50)).await;
     }
 }
