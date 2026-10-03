@@ -22,7 +22,7 @@ use embassy_stm32::time::hz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::usart::{Config as USART_Config, Uart};
 use embassy_stm32::{Peri, adc, bind_interrupts, dma, peripherals, usart};
-use embassy_time::{Duration, Ticker, Timer, WithTimeout};
+use embassy_time::{Duration, Instant, Ticker, Timer, WithTimeout};
 //use embedded_hal::serial;
 //use embassy_time_driver::*;
 use panic_halt as _;
@@ -40,6 +40,8 @@ const HREGISTERS: usize = 8; // Four pairs of PWM duration and frequency values.
 const DUTY_CYCLE_MAX: u16 = 1000;
 const FREQUENCY_MAX: u16 = 200;
 const DEFAULT_MODBUS_ADDRESS: u8 = 8;
+const SERVER_ID: &[u8] = b" microJect"; // No idea why this needs to be prefixed with a space,
+//something in the modbus packaging code is not quite right for this message, FIXME
 
 // Aggravatingly Rust does not have the copy trait for atomic types so initialising statics is a pain in the arse.
 static COIL_DATA: [atomic::AtomicBool; COILS] = [
@@ -136,17 +138,12 @@ async fn input_read(
         //defmt::info!("Optos {} {}", opto0.is_low(), opto1.is_low());
         if local_control {
             // Switch on the PWM based on the isolated inputs
-            //COIL_DATA[0].store(opto0.is_low(), core::sync::atomic::Ordering::Relaxed);
-            //COIL_DATA[1].store(opto1.is_low(), core::sync::atomic::Ordering::Relaxed);
+            COIL_DATA[0].store(opto0.is_low(), core::sync::atomic::Ordering::Relaxed);
+            COIL_DATA[1].store(opto1.is_low(), core::sync::atomic::Ordering::Relaxed);
             HREGISTER_DATA[0].store(IREGISTER_DATA[0].load(Relaxed) / 65, Relaxed); // CH0 Duty cycle
             HREGISTER_DATA[2].store(IREGISTER_DATA[0].load(Relaxed) / 65, Relaxed); // CH1 Duty cycle
             HREGISTER_DATA[1].store(IREGISTER_DATA[1].load(Relaxed) / 650, Relaxed); // CH0 Frequency
             HREGISTER_DATA[3].store(IREGISTER_DATA[1].load(Relaxed) / 650, Relaxed); // CH1 Frequency
-
-            HREGISTER_DATA[1].store(100, Relaxed); // CH0 Frequency
-            HREGISTER_DATA[0].store(200, Relaxed); // CH0 Duty cycle
-            HREGISTER_DATA[2].store(20, Relaxed); // CH1 Duty cycle
-            HREGISTER_DATA[3].store(20, Relaxed); // CH1 Frequency
         }
         // This chip is stupid, you cannot get the ADC to run slowly enough to avoid bogging down everything else
         // so stop it, wait a bit and then kick it off again, bit inefficient because we wake up, kick off the adc conversion and then sleep again
@@ -167,6 +164,7 @@ enum ModbusState {
 
 // reads a coil or discrete input from the appropriate data array and produces the appropriate response
 fn read_boolean(message: &mut [u8; 256], data: &[AtomicBool]) -> Result<usize, u8> {
+    defmt::trace!("Read Discrete Input or coil");
     let start_address: u16 = (message[2] as u16) << 8 | message[3] as u16;
     let num_inputs: u16 = (message[4] as u16) << 8 | message[5] as u16;
     if num_inputs > 0x7d0 {
@@ -200,6 +198,7 @@ fn read_boolean(message: &mut [u8; 256], data: &[AtomicBool]) -> Result<usize, u
 }
 
 fn read_register(message: &mut [u8; 256], data: &[AtomicU16]) -> Result<usize, u8> {
+    defmt::trace!("Read Register");
     let start_address: u16 = (message[2] as u16) << 8 | message[3] as u16;
     let num_regs: u16 = (message[4] as u16) << 8 | message[5] as u16;
     defmt::trace!("Start address: {}", start_address);
@@ -224,6 +223,7 @@ fn read_register(message: &mut [u8; 256], data: &[AtomicU16]) -> Result<usize, u
 }
 
 fn write_coil(message: &mut [u8; 256], data: &[AtomicBool]) -> Result<usize, u8> {
+    defmt::trace!("Write Single coil");
     let coil = (message[2] as u16) << 8 | message[3] as u16;
     let value = (message[4] as u16) << 8 | message[5] as u16;
     if (value != 0xff00) && (value != 0x0000) {
@@ -238,6 +238,7 @@ fn write_coil(message: &mut [u8; 256], data: &[AtomicBool]) -> Result<usize, u8>
 }
 
 fn write_coils(message: &mut [u8; 256], data: &[AtomicBool]) -> Result<usize, u8> {
+    defmt::trace!("Write Multiple coils");
     let coil = (message[2] as u16) << 8 | message[3] as u16;
     let count = (message[4] as u16) << 8 | message[5] as u16;
     let bytes = message[6];
@@ -255,6 +256,7 @@ fn write_coils(message: &mut [u8; 256], data: &[AtomicBool]) -> Result<usize, u8
 }
 
 fn write_register(message: &mut [u8; 256], data: &[AtomicU16]) -> Result<usize, u8> {
+    defmt::trace!("Write Single register");
     let register = (message[2] as u16) << 8 | message[3] as u16;
     let value = (message[4] as u16) << 8 | message[5] as u16;
     if register >= data.len() as u16 {
@@ -265,6 +267,7 @@ fn write_register(message: &mut [u8; 256], data: &[AtomicU16]) -> Result<usize, 
 }
 
 fn write_registers(message: &mut [u8; 256], data: &[AtomicU16]) -> Result<usize, u8> {
+    defmt::trace!("Write Multiple registers");
     let register = (message[2] as u16) << 8 | message[3] as u16;
     let count = (message[4] as u16) << 8 | message[5] as u16;
     let bytes = message[6];
@@ -283,14 +286,75 @@ fn write_registers(message: &mut [u8; 256], data: &[AtomicU16]) -> Result<usize,
     Ok(6)
 }
 
+fn report_server_id(message: &mut [u8; 256], server_id: &[u8]) -> Result<usize, u8> {
+    defmt::trace!("Report server ID");
+    message[2] = server_id.len() as u8 + 1;
+    message[3] = 0x01; // Run
+    //message[4] = server_id.len() as u8;
+    for (i, &byte) in server_id.iter().enumerate() {
+        message[4 + i] = byte;
+    }
+    Ok(server_id.len() + 4)
+}
+
+fn read_pdu(message: &mut [u8; 256]) -> Result<usize, u8> {
+    defmt::trace!("Read PDU");
+    let mei = message[2];
+    let read_device_id = message[3];
+    let mut oid = message[4];
+    if mei != 0x0E {
+        return Err(0x01);
+    }
+    if read_device_id == 0 || read_device_id > 2 {
+        // We support conformity level 2 only
+        return Err(0x03);
+    }
+    if oid > 0x04 {
+        // We only have 5 strings to report
+        return Err(0x04);
+    }
+    let texts: [&[u8]; 5] = [
+        b"MiniMonster",
+        b"MJ4",
+        b"V 1.0.0",
+        b"HTTPS://www.github.com",
+        b"microJect",
+    ];
+    message[5] = 0x02; // Conformance level
+    message[6] = 0x00; // More follows
+    message[7] = 0x00; // Next object ID
+    message[8] = 5 - oid;
+    let mut location = 9; // start of the list
+    loop {
+        if oid > 0x04 {
+            break;
+        }
+        message[location] = oid;
+        let text = texts[oid as usize];
+        message[location + 1] = text.len() as u8;
+        location += 2;
+        for (i, &byte) in text.iter().enumerate() {
+            message[location + i] = byte;
+        }
+        location += text.len();
+        oid += 1;
+    }
+    return Ok(location);
+}
+
 #[embassy_executor::task]
-async fn modbus_task(address: u8, baudrate: u32, mut usart1: Uart<'static, Async>) {
+async fn modbus_task(
+    address: u8,
+    baudrate: u32,
+    manual_control: bool,
+    mut usart1: Uart<'static, Async>,
+) {
     //async fn modbus_task(address: u8, baudrate: u32, p: embassy_stm32::Peripherals) {
     // 11 bits in a serial byte (start + 8 data + parity + stop)
     // 3.5 character times at the given baudrate
     let mut timeout3_5 = 11 * 3_500_000 / baudrate;
     let mut timeout1_5 = 11 * 1_500_000 / baudrate;
-    let timeout_idle = 10_000_000;
+    let timeout_idle = Duration::from_secs(5);
     if baudrate > 19200 {
         // Per current spec, 3.5/1.5 char times are fixed for high baudrates
         timeout3_5 = 1750; // microseconds
@@ -303,6 +367,8 @@ async fn modbus_task(address: u8, baudrate: u32, mut usart1: Uart<'static, Async
     let mut serial_timeout = timeout3_5;
     let mut broadcast = false;
     let mut mute = false;
+    let mut last_message = Instant::now();
+
     loop {
         let status = usart1
             .read(&mut rx_buffer)
@@ -313,6 +379,13 @@ async fn modbus_task(address: u8, baudrate: u32, mut usart1: Uart<'static, Async
                 defmt::trace!("Received byte: {:?}", rx_buffer[0]);
             }
             Err(_) => {}
+        }
+        if Instant::now() - last_message > timeout_idle && !manual_control {
+            // Reset coil data if no message received for idle timeout thus stopping pulse generation
+            COIL_DATA[0].store(false, Relaxed);
+            COIL_DATA[1].store(false, Relaxed);
+            COIL_DATA[2].store(false, Relaxed);
+            COIL_DATA[3].store(false, Relaxed);
         }
         match state {
             ModbusState::WaitForIdle3_5 => {
@@ -326,7 +399,7 @@ async fn modbus_task(address: u8, baudrate: u32, mut usart1: Uart<'static, Async
                         if e == embassy_time::TimeoutError {
                             state = ModbusState::Idle;
                             bytes_received = 0;
-                            serial_timeout = timeout_idle; // Deliberately long timeout to wait in idle
+                            serial_timeout = timeout_idle.as_micros() as u32; // Deliberately long timeout to wait in idle
                             defmt::trace!("Modbus state changed to Idle");
                         } else {
                             defmt::debug!("read error: {:?}", e);
@@ -334,7 +407,6 @@ async fn modbus_task(address: u8, baudrate: u32, mut usart1: Uart<'static, Async
                         }
                     }
                 }
-                continue;
             }
             ModbusState::Idle => {
                 bytes_received = 0;
@@ -380,12 +452,14 @@ async fn modbus_task(address: u8, baudrate: u32, mut usart1: Uart<'static, Async
                             serial_timeout = timeout3_5;
                             bytes_received = 0;
                             state = ModbusState::WaitForIdle3_5;
+                            break;
                         }
                     }
                     Err(e) => {
                         if e == embassy_time::TimeoutError {
                             // We got a possibly complete frame
                             defmt::debug!("Message received '{}'", serial_data[0..bytes_received]);
+                            last_message = Instant::now(); // Deal with the timeout for loss of comms
                             if bytes_received > 3 {
                                 // address, function code, CRC, CRC
                                 // See if the CRC is good
@@ -395,88 +469,76 @@ async fn modbus_task(address: u8, baudrate: u32, mut usart1: Uart<'static, Async
                                 {
                                     defmt::trace!("CRC OK");
                                     let opcode = serial_data[1];
-                                    let mut resultcode = 0x00; // set non zero if we are going to return an exception
-                                    let mut payload_bytes: usize = 0; // Payload length in bytes not including checksum
-                                    //let rx_length = bytes_received - 4; // address, opcode, CRC CRC
-                                    //let rx_data = &serial_data[2..]; // Note this buffer is also used for transmitting responses which can be larger then the request.
+                                    let resultcode: Result<usize, u8>;
+                                    //let mut resultcode = 0x00; // set non zero if we are going to return an exception
+
                                     match opcode {
                                         0x01 => {
-                                            defmt::trace!("Read Discrete Coils");
-                                            match read_boolean(&mut serial_data, &COIL_DATA) {
-                                                Ok(bytes) => payload_bytes = bytes,
-                                                Err(code) => resultcode = code,
-                                            }
+                                            resultcode = read_boolean(&mut serial_data, &COIL_DATA)
                                         }
 
                                         0x02 => {
-                                            defmt::trace!("Read Discrete Inputs");
-                                            match read_boolean(&mut serial_data, &INPUT_DATA) {
-                                                Ok(bytes) => payload_bytes = bytes,
-                                                Err(code) => resultcode = code,
-                                            }
+                                            resultcode = read_boolean(&mut serial_data, &INPUT_DATA)
                                         }
+
                                         0x03 => {
-                                            defmt::trace!("Read Holding Regs");
-                                            match read_register(&mut serial_data, &HREGISTER_DATA) {
-                                                Ok(bytes) => payload_bytes = bytes,
-                                                Err(code) => resultcode = code,
-                                            }
+                                            resultcode =
+                                                read_register(&mut serial_data, &HREGISTER_DATA)
                                         }
+
                                         0x04 => {
-                                            defmt::trace!("Read Input Regs");
-                                            match read_register(&mut serial_data, &IREGISTER_DATA) {
-                                                Ok(bytes) => payload_bytes = bytes,
-                                                Err(code) => resultcode = code,
-                                            }
+                                            resultcode =
+                                                read_register(&mut serial_data, &IREGISTER_DATA)
                                         }
+
                                         0x05 => {
-                                            defmt::trace!("Write Single coil");
-                                            match write_coil(&mut serial_data, &COIL_DATA) {
-                                                Ok(bytes) => payload_bytes = bytes,
-                                                Err(code) => resultcode = code,
-                                            }
+                                            resultcode = write_coil(&mut serial_data, &COIL_DATA)
                                         }
+
                                         0x06 => {
-                                            defmt::trace!("Write Single register");
-                                            match write_register(&mut serial_data, &HREGISTER_DATA)
-                                            {
-                                                Ok(bytes) => payload_bytes = bytes,
-                                                Err(code) => resultcode = code,
-                                            }
+                                            resultcode =
+                                                write_register(&mut serial_data, &HREGISTER_DATA)
                                         }
+
                                         0x0f => {
-                                            defmt::trace!("Write Multiple coils");
-                                            match write_coils(&mut serial_data, &COIL_DATA) {
-                                                Ok(bytes) => payload_bytes = bytes,
-                                                Err(code) => resultcode = code,
-                                            }
+                                            resultcode = write_coils(&mut serial_data, &COIL_DATA)
                                         }
+
                                         0x10 => {
-                                            defmt::trace!("Write Multiple registers");
-                                            match write_registers(&mut serial_data, &HREGISTER_DATA)
-                                            {
-                                                Ok(bytes) => payload_bytes = bytes,
-                                                Err(code) => resultcode = code,
-                                            }
+                                            resultcode =
+                                                write_registers(&mut serial_data, &HREGISTER_DATA)
                                         }
+
+                                        0x11 => {
+                                            resultcode =
+                                                report_server_id(&mut serial_data, &SERVER_ID)
+                                        }
+                                        0x2b => resultcode = read_pdu(&mut serial_data),
+
                                         _ => {
                                             // Unknown command
-                                            resultcode = 0x01
+                                            resultcode = Err(0x01)
                                         }
                                     }
-                                    if resultcode != 0 {
-                                        // send the exception response
-                                        defmt::trace!("Sending exception response {}", resultcode);
-                                        serial_data[1] |= 0x80; // Mark this as an exception
-                                        serial_data[2] = resultcode;
-                                        payload_bytes = 3;
+                                    let response_bytes: usize; // Response length in bytes not including checksum, but including the address and opcode
+                                    match resultcode {
+                                        Ok(length) => {
+                                            response_bytes = length;
+                                        }
+                                        Err(code) => {
+                                            // send the exception response
+                                            defmt::trace!("Sending exception response {}", code);
+                                            serial_data[1] |= 0x80; // Mark this as an exception
+                                            serial_data[2] = code;
+                                            response_bytes = 3;
+                                        }
                                     }
-                                    let crc = crc16(&serial_data[..payload_bytes as usize]);
-                                    serial_data[payload_bytes] = crc.1;
-                                    serial_data[payload_bytes + 1] = crc.0;
-                                    defmt::trace!("Sending {}", serial_data[..payload_bytes + 2]);
+                                    let crc = crc16(&serial_data[..response_bytes as usize]);
+                                    serial_data[response_bytes] = crc.1;
+                                    serial_data[response_bytes + 1] = crc.0;
+                                    defmt::trace!("Sending {}", serial_data[..response_bytes + 2]);
                                     if (!broadcast) && (!mute) {
-                                        usart1.write(&serial_data[..payload_bytes + 2]).await.ok();
+                                        usart1.write(&serial_data[..response_bytes + 2]).await.ok();
                                     }
                                 } else {
                                     defmt::debug!("CRC fail");
@@ -630,7 +692,7 @@ async fn main(spawner: Spawner) {
         .unwrap(),
     );
     // Kick off the modbus interface task
-    spawner.spawn(modbus_task(modbus_address, baud, usart).unwrap());
+    spawner.spawn(modbus_task(modbus_address, baud, sw1.is_low(), usart).unwrap());
 
     let mut old_dutycycles = [0u16; 3];
     loop {
