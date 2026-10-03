@@ -11,20 +11,19 @@ use core::sync::atomic::Ordering::Relaxed;
 //use async_std::task;
 use core::sync::atomic::{self, AtomicBool, AtomicU16};
 //use cortex_m::Peripherals;
-use defmt::*;
+//use defmt::*;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_stm32::adc::{Adc, AdcChannel, Config as ADC_Config, SampleTime};
-use embassy_stm32::gpio::{AnyPin, Input, Level, Output, OutputType, Pin, Pull, Speed};
+use embassy_stm32::gpio::{AnyPin, Input, Level, Output, OutputType, Pull, Speed};
 use embassy_stm32::mode::Async;
 use embassy_stm32::rcc::{Pll, PllMul, PllPreDiv, PllSource, Sysclk};
 use embassy_stm32::time::hz;
 use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
-use embassy_stm32::timer::{Channel, simple_pwm};
 use embassy_stm32::usart::{Config as USART_Config, Uart};
-use embassy_stm32::{Config, Peri, adc, bind_interrupts, dma, peripherals, usart};
-use embassy_time::{Delay, Duration, Instant, Ticker, Timer, WithTimeout, with_timeout};
-use embedded_hal::serial;
+use embassy_stm32::{Peri, adc, bind_interrupts, dma, peripherals, usart};
+use embassy_time::{Duration, Ticker, Timer, WithTimeout};
+//use embedded_hal::serial;
 //use embassy_time_driver::*;
 use panic_halt as _;
 use static_cell::StaticCell;
@@ -92,10 +91,10 @@ async fn input_read(
     let mut adc_con = ADC_Config::default();
     adc_con.resolution = Some(embassy_stm32::adc::Resolution::Bits12);
     adc_con.clock = embassy_stm32::adc::Clock::Sync(adc::SyncDiv::Div4);
-    //    defmt::trace!("Configuring ADC");
+    defmt::trace!("Configuring ADC");
     let adc = Adc::new_blocking(adc, adc_con);
     adc.sample_time_for_us(100);
-    //    defmt::trace!("Configuring ADC DMA");
+    defmt::trace!("Configuring ADC DMA");
     let mut ring_buffered_adc = adc.into_ring_buffered(
         dma,
         adc_dma_buf,
@@ -107,7 +106,7 @@ async fn input_read(
         .into_iter(),
         None,
     );
-    //    defmt::trace!("Configuring Opto inputs");
+    defmt::trace!("Configuring Opto inputs");
     let opto0 = Input::new(opto_pin0, Pull::Up);
     let opto1 = Input::new(opto_pin1, Pull::Up);
     let mut measurements = [0u16; DMA_BUF_LEN / 2];
@@ -128,7 +127,7 @@ async fn input_read(
                 IREGISTER_DATA[1].store(adc2_avg as u16, core::sync::atomic::Ordering::Relaxed);
             }
             Err(e) => {
-                //warn!("Error: {:?}", e);
+                defmt::error!("Error: {:?}", e);
             }
         }
         // Read the opto isolated inputs, might as well do this here, it runs sufficiently often
@@ -170,7 +169,7 @@ enum ModbusState {
 fn read_boolean(message: &mut [u8; 256], data: &[AtomicBool]) -> Result<usize, u8> {
     let start_address: u16 = (message[2] as u16) << 8 | message[3] as u16;
     let num_inputs: u16 = (message[4] as u16) << 8 | message[5] as u16;
-    if (num_inputs > 0x7d0) {
+    if num_inputs > 0x7d0 {
         return Err(3);
     }
     if (start_address + num_inputs) > data.len() as u16 {
@@ -186,7 +185,7 @@ fn read_boolean(message: &mut [u8; 256], data: &[AtomicBool]) -> Result<usize, u
     for i in 0..num_inputs as usize {
         address = 3 + i / 8;
         let bit = 1 << (i % 8);
-        if (data[i as usize].load(Relaxed)) {
+        if data[i as usize].load(Relaxed) {
             coil_bits |= bit;
         }
         if (i % 8) == 7 {
@@ -196,6 +195,8 @@ fn read_boolean(message: &mut [u8; 256], data: &[AtomicBool]) -> Result<usize, u
     }
     message[address] = coil_bits as u8;
     Ok(payload_bytes + 3)
+    // Note Payload bytes is everything up to the CRC, not including the CRC itself.
+    // This includes the address and opcode bytes on the start of the message.
 }
 
 fn read_register(message: &mut [u8; 256], data: &[AtomicU16]) -> Result<usize, u8> {
@@ -203,7 +204,7 @@ fn read_register(message: &mut [u8; 256], data: &[AtomicU16]) -> Result<usize, u
     let num_regs: u16 = (message[4] as u16) << 8 | message[5] as u16;
     defmt::trace!("Start address: {}", start_address);
     defmt::trace!("Number of registers: {}", num_regs);
-    if (num_regs > 0x7d) {
+    if num_regs > 0x7d {
         defmt::debug!("Number of registers too large");
         return Err(0x03);
     }
@@ -236,6 +237,52 @@ fn write_coil(message: &mut [u8; 256], data: &[AtomicBool]) -> Result<usize, u8>
     Ok(6)
 }
 
+fn write_coils(message: &mut [u8; 256], data: &[AtomicBool]) -> Result<usize, u8> {
+    let coil = (message[2] as u16) << 8 | message[3] as u16;
+    let count = (message[4] as u16) << 8 | message[5] as u16;
+    let bytes = message[6];
+    if (count > 0x7b0) || (bytes as u16 != (count + 7) / 8) {
+        return Err(0x03);
+    }
+    if (coil + count) > data.len() as u16 {
+        return Err(0x02);
+    }
+    for i in 0..count {
+        data[(coil + i) as usize]
+            .store(message[(7 + i / 8) as usize] & (1 << (i % 8)) != 0, Relaxed);
+    }
+    Ok(6)
+}
+
+fn write_register(message: &mut [u8; 256], data: &[AtomicU16]) -> Result<usize, u8> {
+    let register = (message[2] as u16) << 8 | message[3] as u16;
+    let value = (message[4] as u16) << 8 | message[5] as u16;
+    if register >= data.len() as u16 {
+        return Err(0x02);
+    }
+    data[register as usize].store(value, Relaxed);
+    Ok(6)
+}
+
+fn write_registers(message: &mut [u8; 256], data: &[AtomicU16]) -> Result<usize, u8> {
+    let register = (message[2] as u16) << 8 | message[3] as u16;
+    let count = (message[4] as u16) << 8 | message[5] as u16;
+    let bytes = message[6];
+    if (count > 0x7b) || (bytes as u16 != 2 * count) {
+        return Err(0x03);
+    }
+    if register + count > data.len() as u16 {
+        return Err(0x02);
+    }
+    for i in 0..count {
+        data[(register + i) as usize].store(
+            (message[(7 + i / 8) as usize] as u16) << 8 | message[(8 + i / 8) as usize] as u16,
+            Relaxed,
+        );
+    }
+    Ok(6)
+}
+
 #[embassy_executor::task]
 async fn modbus_task(address: u8, baudrate: u32, mut usart1: Uart<'static, Async>) {
     //async fn modbus_task(address: u8, baudrate: u32, p: embassy_stm32::Peripherals) {
@@ -244,7 +291,7 @@ async fn modbus_task(address: u8, baudrate: u32, mut usart1: Uart<'static, Async
     let mut timeout3_5 = 11 * 3_500_000 / baudrate;
     let mut timeout1_5 = 11 * 1_500_000 / baudrate;
     let timeout_idle = 10_000_000;
-    if (baudrate > 19200) {
+    if baudrate > 19200 {
         // Per current spec, 3.5/1.5 char times are fixed for high baudrates
         timeout3_5 = 1750; // microseconds
         timeout1_5 = 750;
@@ -252,7 +299,7 @@ async fn modbus_task(address: u8, baudrate: u32, mut usart1: Uart<'static, Async
     let mut rx_buffer = [0u8; 1];
     let mut state = ModbusState::WaitForIdle3_5;
     let mut bytes_received = 0;
-    let mut rx_data = [0u8; 256]; // Max length per modbus spec
+    let mut serial_data = [0u8; 256]; // Max length per modbus spec
     let mut serial_timeout = timeout3_5;
     let mut broadcast = false;
     let mut mute = false;
@@ -293,13 +340,13 @@ async fn modbus_task(address: u8, baudrate: u32, mut usart1: Uart<'static, Async
                 bytes_received = 0;
                 match status {
                     Ok(_) => {
-                        rx_data[0] = rx_buffer[0];
+                        serial_data[0] = rx_buffer[0];
                         bytes_received += 1;
-                        if ((rx_buffer[0] == address) || (rx_buffer[0] == 0)) {
+                        if (rx_buffer[0] == address) || (rx_buffer[0] == 0) {
                             // it is addressed to us
                             broadcast = false;
                             defmt::trace!("Address match {}", rx_buffer[0]);
-                            if (rx_buffer[0] == 0) {
+                            if rx_buffer[0] == 0 {
                                 // broadcast
                                 broadcast = true;
                                 defmt::trace!("Broadcast");
@@ -325,10 +372,10 @@ async fn modbus_task(address: u8, baudrate: u32, mut usart1: Uart<'static, Async
             }
             ModbusState::RxData => {
                 match status {
-                    Ok(status) => {
-                        rx_data[bytes_received] = rx_buffer[0];
+                    Ok(_) => {
+                        serial_data[bytes_received] = rx_buffer[0];
                         bytes_received += 1;
-                        if bytes_received == rx_data.len() {
+                        if bytes_received == serial_data.len() {
                             defmt::debug!("Receive length overrun");
                             serial_timeout = timeout3_5;
                             bytes_received = 0;
@@ -338,22 +385,24 @@ async fn modbus_task(address: u8, baudrate: u32, mut usart1: Uart<'static, Async
                     Err(e) => {
                         if e == embassy_time::TimeoutError {
                             // We got a possibly complete frame
-                            defmt::debug!("Message received '{}'", rx_data[0..bytes_received]);
+                            defmt::debug!("Message received '{}'", serial_data[0..bytes_received]);
                             if bytes_received > 3 {
                                 // address, function code, CRC, CRC
                                 // See if the CRC is good
-                                let crc = crc16(&rx_data[0..bytes_received - 2]);
-                                if (crc.1 == rx_data[bytes_received - 2])
-                                    && (crc.0 == rx_data[bytes_received - 1])
+                                let crc = crc16(&serial_data[0..bytes_received - 2]);
+                                if (crc.1 == serial_data[bytes_received - 2])
+                                    && (crc.0 == serial_data[bytes_received - 1])
                                 {
                                     defmt::trace!("CRC OK");
-                                    let opcode = rx_data[1];
+                                    let opcode = serial_data[1];
                                     let mut resultcode = 0x00; // set non zero if we are going to return an exception
-                                    let mut payload_bytes: usize = 0; // Payload length in bytes not including checksu
+                                    let mut payload_bytes: usize = 0; // Payload length in bytes not including checksum
+                                    //let rx_length = bytes_received - 4; // address, opcode, CRC CRC
+                                    //let rx_data = &serial_data[2..]; // Note this buffer is also used for transmitting responses which can be larger then the request.
                                     match opcode {
                                         0x01 => {
                                             defmt::trace!("Read Discrete Coils");
-                                            match read_boolean(&mut rx_data, &COIL_DATA) {
+                                            match read_boolean(&mut serial_data, &COIL_DATA) {
                                                 Ok(bytes) => payload_bytes = bytes,
                                                 Err(code) => resultcode = code,
                                             }
@@ -361,51 +410,73 @@ async fn modbus_task(address: u8, baudrate: u32, mut usart1: Uart<'static, Async
 
                                         0x02 => {
                                             defmt::trace!("Read Discrete Inputs");
-                                            match read_boolean(&mut rx_data, &INPUT_DATA) {
+                                            match read_boolean(&mut serial_data, &INPUT_DATA) {
                                                 Ok(bytes) => payload_bytes = bytes,
                                                 Err(code) => resultcode = code,
                                             }
                                         }
                                         0x03 => {
                                             defmt::trace!("Read Holding Regs");
-                                            match read_register(&mut rx_data, &HREGISTER_DATA) {
+                                            match read_register(&mut serial_data, &HREGISTER_DATA) {
                                                 Ok(bytes) => payload_bytes = bytes,
                                                 Err(code) => resultcode = code,
                                             }
                                         }
                                         0x04 => {
                                             defmt::trace!("Read Input Regs");
-                                            match read_register(&mut rx_data, &IREGISTER_DATA) {
+                                            match read_register(&mut serial_data, &IREGISTER_DATA) {
                                                 Ok(bytes) => payload_bytes = bytes,
                                                 Err(code) => resultcode = code,
                                             }
                                         }
                                         0x05 => {
                                             defmt::trace!("Write Single coil");
-                                            match write_coil(&mut rx_data, &COIL_DATA) {
+                                            match write_coil(&mut serial_data, &COIL_DATA) {
                                                 Ok(bytes) => payload_bytes = bytes,
                                                 Err(code) => resultcode = code,
                                             }
                                         }
-
+                                        0x06 => {
+                                            defmt::trace!("Write Single register");
+                                            match write_register(&mut serial_data, &HREGISTER_DATA)
+                                            {
+                                                Ok(bytes) => payload_bytes = bytes,
+                                                Err(code) => resultcode = code,
+                                            }
+                                        }
+                                        0x0f => {
+                                            defmt::trace!("Write Multiple coils");
+                                            match write_coils(&mut serial_data, &COIL_DATA) {
+                                                Ok(bytes) => payload_bytes = bytes,
+                                                Err(code) => resultcode = code,
+                                            }
+                                        }
+                                        0x10 => {
+                                            defmt::trace!("Write Multiple registers");
+                                            match write_registers(&mut serial_data, &HREGISTER_DATA)
+                                            {
+                                                Ok(bytes) => payload_bytes = bytes,
+                                                Err(code) => resultcode = code,
+                                            }
+                                        }
                                         _ => {
                                             // Unknown command
                                             resultcode = 0x01
                                         }
                                     }
-                                    if (resultcode != 0) {
+                                    if resultcode != 0 {
                                         // send the exception response
                                         defmt::trace!("Sending exception response {}", resultcode);
-                                        rx_data[1] |= 0x80; // Mark this as an exception
-                                        rx_data[2] = resultcode;
+                                        serial_data[1] |= 0x80; // Mark this as an exception
+                                        serial_data[2] = resultcode;
                                         payload_bytes = 3;
                                     }
-                                    let crc = crc16(&rx_data[..payload_bytes as usize]);
-                                    rx_data[payload_bytes] = crc.1;
-                                    rx_data[payload_bytes + 1] = crc.0;
-                                    defmt::trace!("Sending {}", rx_data[..payload_bytes + 2]);
+                                    let crc = crc16(&serial_data[..payload_bytes as usize]);
+                                    serial_data[payload_bytes] = crc.1;
+                                    serial_data[payload_bytes + 1] = crc.0;
+                                    defmt::trace!("Sending {}", serial_data[..payload_bytes + 2]);
                                     if (!broadcast) && (!mute) {
-                                        usart1.write(&rx_data[..payload_bytes + 2]).await.ok();
+                                        usart1.write(&serial_data[..payload_bytes + 2]).await.ok();
                                     }
                                 } else {
                                     defmt::debug!("CRC fail");
@@ -569,7 +640,7 @@ async fn main(spawner: Spawner) {
         // Set the frequency if that has changed
         let mut duty_cycle1 = HREGISTER_DATA[0].load(core::sync::atomic::Ordering::Relaxed);
         let mut frequency1 = HREGISTER_DATA[1].load(core::sync::atomic::Ordering::Relaxed);
-        if (duty_cycle1 > DUTY_CYCLE_MAX) {
+        if duty_cycle1 > DUTY_CYCLE_MAX {
             duty_cycle1 = DUTY_CYCLE_MAX;
         }
         if frequency1 < 1 {
@@ -608,7 +679,7 @@ async fn main(spawner: Spawner) {
         if frequency2 > FREQUENCY_MAX {
             frequency2 = FREQUENCY_MAX;
         }
-        if (duty_cycle2 > DUTY_CYCLE_MAX) {
+        if duty_cycle2 > DUTY_CYCLE_MAX {
             duty_cycle2 = DUTY_CYCLE_MAX;
         }
         if hz(frequency2 as u32) != pwm2.get_frequency() {
@@ -640,7 +711,7 @@ async fn main(spawner: Spawner) {
         if frequency3 > FREQUENCY_MAX {
             frequency3 = FREQUENCY_MAX;
         }
-        if (duty_cycle3 > DUTY_CYCLE_MAX) {
+        if duty_cycle3 > DUTY_CYCLE_MAX {
             duty_cycle3 = DUTY_CYCLE_MAX;
         }
         if hz(frequency3 as u32) != pwm3.get_frequency() {
