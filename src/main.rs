@@ -33,6 +33,7 @@ use static_cell::StaticCell;
 //use embassy_stm32::_generated::peripherals::DMA1_CH2
 
 const DMA_BUF_LEN: usize = 64;
+const UART_BUF_LEN: usize = 64;
 const COILS: usize = 4; // Enables for the PWM Outputs.
 const INPUTS: usize = 2; // Two opto isolators.
 const IREGISTERS: usize = 2; // Two Analog inputs.
@@ -347,11 +348,10 @@ async fn modbus_task(
     address: u8,
     baudrate: u32,
     manual_control: bool,
-    mut usart1: Uart<'static, Async>,
+    uart: Uart<'static, Async>,
     mut modbus_data_led: Output<'static>,
     mut modbus_err_led: Output<'static>,
 ) {
-    //async fn modbus_task(address: u8, baudrate: u32, p: embassy_stm32::Peripherals) {
     // 11 bits in a serial byte (start + 8 data + parity + stop)
     // 3.5 character times at the given baudrate
     let mut timeout3_5 = 11 * 3_500_000 / baudrate;
@@ -362,6 +362,11 @@ async fn modbus_task(
         timeout3_5 = 1750; // microseconds
         timeout1_5 = 750;
     }
+    // split the UART buffer into tx and rx halves so we can have a DMA ring buffer on the rx side
+    let mut dma_buffer = [0u8; UART_BUF_LEN];
+    let (mut uart_tx, uart_rx) = uart.split();
+    let mut rx_ringbuffered = uart_rx.into_ring_buffered(&mut dma_buffer);
+
     let mut rx_buffer = [0u8; 1];
     let mut state = ModbusState::WaitForIdle3_5;
     let mut bytes_received = 0;
@@ -372,7 +377,7 @@ async fn modbus_task(
     let mut last_message = Instant::now();
 
     loop {
-        let status = usart1
+        let status = rx_ringbuffered
             .read(&mut rx_buffer)
             .with_timeout(Duration::from_micros(serial_timeout as u64))
             .await;
@@ -479,8 +484,6 @@ async fn modbus_task(
                                     modbus_data_led.toggle();
                                     let opcode = serial_data[1];
                                     let resultcode: Result<usize, u8>;
-                                    //let mut resultcode = 0x00; // set non zero if we are going to return an exception
-
                                     match opcode {
                                         0x01 => {
                                             resultcode = read_boolean(&mut serial_data, &COIL_DATA)
@@ -549,7 +552,10 @@ async fn modbus_task(
                                     serial_data[response_bytes + 1] = crc.0;
                                     defmt::trace!("Sending {}", serial_data[..response_bytes + 2]);
                                     if (!broadcast) && (!mute) {
-                                        usart1.write(&serial_data[..response_bytes + 2]).await.ok();
+                                        uart_tx
+                                            .write(&serial_data[..response_bytes + 2])
+                                            .await
+                                            .ok();
                                     }
                                 } else {
                                     defmt::debug!("CRC fail");
