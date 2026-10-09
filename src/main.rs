@@ -2,35 +2,21 @@
 #![no_main]
 
 // Note local copies of systick-timer crate because I could not get the dependencies to resolve
-//mod timer;
-//use timer::Timer as Coretimer;
-//mod embassy_driver;
-//use embassy_driver::SystickDriver;
 
 use core::sync::atomic::Ordering::Relaxed;
-//use async_std::task;
 use core::sync::atomic::{self, AtomicBool, AtomicU16};
 //use cortex_m::Peripherals;
-//use defmt::*;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_stm32::adc::{Adc, AdcChannel, Config as ADC_Config, SampleTime};
-use embassy_stm32::gpio::{AnyPin, Input, Level, Output, OutputType, Pull, Speed};
+use embassy_stm32::gpio::{AnyPin, Input, Level, Output, Pull, Speed};
 use embassy_stm32::mode::Async;
 use embassy_stm32::rcc::{Pll, PllMul, PllPreDiv, PllSource, Sysclk};
-use embassy_stm32::time::hz;
-use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
 use embassy_stm32::usart::{Config as USART_Config, Uart};
 use embassy_stm32::{Peri, adc, bind_interrupts, dma, peripherals, usart};
-use embassy_time::{Duration, Instant, Ticker, Timer, WithTimeout};
-//use embedded_hal::serial;
-//use embassy_time_driver::*;
+use embassy_time::{Duration, Instant, Ticker, WithTimeout};
 use panic_halt as _;
 use static_cell::StaticCell;
-//use systick_timer::SystickDriver;
-
-//use embassy_stm32::_generated::interrupt::typelevel::DMA1_CHANNEL2_3
-//use embassy_stm32::_generated::peripherals::DMA1_CH2
 
 const DMA_BUF_LEN: usize = 64;
 const UART_BUF_LEN: usize = 64;
@@ -65,18 +51,11 @@ static HREGISTER_DATA: [atomic::AtomicU16; HREGISTERS] = [
 ];
 
 bind_interrupts!(struct Irqs {
-    USART1 => usart::InterruptHandler<peripherals::USART1>;
+    USART1 => usart::InterruptHandler<peripherals::USART1>; //UART Itself
     DMA1_CHANNEL1 => dma::InterruptHandler<peripherals::DMA1_CH1>; // ADC
-    DMA1_CHANNEL2_3 => dma::InterruptHandler<peripherals::DMA1_CH2>;
-    DMA1_CHANNEL4_5 => dma::InterruptHandler<peripherals::DMA1_CH5>;
+    DMA1_CHANNEL2_3 => dma::InterruptHandler<peripherals::DMA1_CH2>; // UART DMA
+    DMA1_CHANNEL4_5 => dma::InterruptHandler<peripherals::DMA1_CH5>; //UART DMA
 });
-
-//embassy_time_driver::time_driver_impl!(static DRIVER: SystickDriver<4>
-//    = SystickDriver::new(48_000_000, 47_999));
-//#[cortex_m_rt::exception]
-//fn SysTick() {
-//    DRIVER.systick_interrupt();
-//}
 
 // Periodically read the analog and opto isolated inputs, and update the state as indicated.
 #[embassy_executor::task]
@@ -87,7 +66,7 @@ async fn input_read(
     adc_pin1: Peri<'static, peripherals::PA5>, //ADC input 2
     opto_pin0: Peri<'static, AnyPin>,          // Opto input 1
     opto_pin1: Peri<'static, AnyPin>,          // Opto input 2
-    local_control: bool, // True if logal switches and pots are being used to control the output
+    local_control: bool, // True if local switches and pots are being used to control the output
 ) {
     static ADC_DMA_BUF: StaticCell<[u16; DMA_BUF_LEN]> = StaticCell::new();
     let adc_dma_buf = ADC_DMA_BUF.init([0u16; DMA_BUF_LEN]);
@@ -280,7 +259,7 @@ fn write_registers(message: &mut [u8; 256], data: &[AtomicU16]) -> Result<usize,
     }
     for i in 0..count {
         data[(register + i) as usize].store(
-            (message[(7 + i / 8) as usize] as u16) << 8 | message[(8 + i / 8) as usize] as u16,
+            (message[(7 + 2 * i) as usize] as u16) << 8 | message[(8 + 2 * i) as usize] as u16,
             Relaxed,
         );
     }
@@ -310,10 +289,6 @@ fn read_pdu(message: &mut [u8; 256]) -> Result<usize, u8> {
         // We support conformity level 2 only
         return Err(0x03);
     }
-    if oid > 0x04 {
-        // We only have 5 strings to report
-        return Err(0x04);
-    }
     let texts: [&[u8]; 5] = [
         b"MiniMonster",
         b"MJ4",
@@ -321,10 +296,15 @@ fn read_pdu(message: &mut [u8; 256]) -> Result<usize, u8> {
         b"HTTPS://www.github.com",
         b"microJect",
     ];
+    if oid >= texts.len() as u8 {
+        // We only have 5 strings to report
+        return Err(0x04);
+    }
+
     message[5] = 0x02; // Conformance level
     message[6] = 0x00; // More follows
     message[7] = 0x00; // Next object ID
-    message[8] = 5 - oid;
+    message[8] = texts.len() as u8 - oid;
     let mut location = 9; // start of the list
     loop {
         if oid > 0x04 {
@@ -363,6 +343,7 @@ async fn modbus_task(
         timeout1_5 = 750;
     }
     // split the UART buffer into tx and rx halves so we can have a DMA ring buffer on the rx side
+    // stm32 uarts are pathetic.
     let mut dma_buffer = [0u8; UART_BUF_LEN];
     let (mut uart_tx, uart_rx) = uart.split();
     let mut rx_ringbuffered = uart_rx.into_ring_buffered(&mut dma_buffer);
@@ -370,7 +351,7 @@ async fn modbus_task(
     let mut rx_buffer = [0u8; 1];
     let mut state = ModbusState::WaitForIdle3_5;
     let mut bytes_received = 0;
-    let mut serial_data = [0u8; 256]; // Max length per modbus spec
+    let mut serial_data = [0u8; 256]; // Max length per modbus spec, used for both input and output
     let mut serial_timeout = timeout3_5;
     let mut broadcast = false;
     let mut mute = false;
@@ -461,9 +442,6 @@ async fn modbus_task(
                         bytes_received += 1;
                         if bytes_received == serial_data.len() {
                             defmt::debug!("Receive length overrun");
-                            serial_timeout = timeout3_5;
-                            bytes_received = 0;
-                            state = ModbusState::WaitForIdle3_5;
                             modbus_err_led.set_high();
                             break;
                         }
@@ -594,10 +572,6 @@ async fn main(spawner: Spawner) {
     // UART Clock
     cnf.rcc.mux.usart1sw = embassy_stm32::rcc::mux::Usart1sw::Sys;
     let p = embassy_stm32::init(cnf);
-    // Core timer as system time
-    //let mut periph = Peripherals::take().unwrap();
-    //DRIVER.start(&mut periph.SYST);
-
     let sw1 = Input::new(p.PA9, Pull::Up); // SW1 selects if modbus should be overridden by the analog and opto inputs
     let sw2 = Input::new(p.PA10, Pull::Up); // Alternate modbus address
     let sw3 = Input::new(p.PA11, Pull::Up); // Baud rate select MSB
@@ -647,56 +621,16 @@ async fn main(spawner: Spawner) {
         defmt::info!("Overriding modbus input with local inputs");
     }
 
-    let mut led1 = Output::new(p.PB3, Level::High, Speed::Low);
-    let mut led2 = Output::new(p.PB4, Level::High, Speed::Low);
-    let mut led3 = Output::new(p.PB5, Level::High, Speed::Low);
+    let mut led1 = Output::new(p.PB3, Level::Low, Speed::Low);
+    let led2 = Output::new(p.PB4, Level::Low, Speed::Low);
+    let led3 = Output::new(p.PB5, Level::Low, Speed::Low);
 
-    let ch1_pin = PwmPin::new(p.PA7, OutputType::PushPull);
-    let mut pwm1 = SimplePwm::new(
-        p.TIM14,
-        Some(ch1_pin),
-        None,
-        None,
-        None,
-        hz(20),
-        Default::default(),
-    );
-
-    let ch2_pin = PwmPin::new(p.PA6, OutputType::PushPull);
-    let mut pwm2 = SimplePwm::new(
-        p.TIM16,
-        Some(ch2_pin),
-        None,
-        None,
-        None,
-        hz(50),
-        Default::default(),
-    );
-
-    //ch2.set_duty_cycle_percent(10);
-
-    let ch3_pin = PwmPin::new(p.PA8, OutputType::PushPull);
-    let mut pwm3 = SimplePwm::new(
-        p.TIM1,
-        Some(ch3_pin),
-        None,
-        None,
-        None,
-        hz(5),
-        Default::default(),
-    );
-    //let mut ch3 = pwm3.ch1();
-    //ch3.disable();
-    //ch3.set_duty_cycle_percent(50);
-
-    // TODO FIXME, make the core timer use the systick and not TIM3.
-    //let ch4_pin = PwmPin::new(p.PB0, OutputType::PushPull);
-    //let mut pwm4 = SimplePwm::new(p.TIM3, None, None, Some(ch4_pin), None, Hz(10), Default::default());
-    //let mut ch4 = pwm4.ch3();
-    //ch4.enable();
-    //pwm4.set_frequency(Hz(100));
-    //  ch4.set_duty_cycle_percent(5);
-    //
+    let mut pwm_pins = [
+        Output::new(p.PA7, Level::Low, Speed::Low),
+        Output::new(p.PA6, Level::Low, Speed::Low),
+        Output::new(p.PA8, Level::Low, Speed::Low),
+        Output::new(p.PB0, Level::Low, Speed::Low),
+    ];
     // Kick off the ADC and GPI task
     spawner.spawn(
         input_read(
@@ -712,112 +646,43 @@ async fn main(spawner: Spawner) {
     );
     // Kick off the modbus interface task
     spawner.spawn(modbus_task(modbus_address, baud, sw1.is_low(), usart, led2, led3).unwrap());
-
-    let mut old_dutycycles = [0u16; 3];
+    // spin making the PWM signals
+    let mut led_tbase = 0u16;
+    let mut counters: [u16; 4] = [0u16; 4];
+    let mut timebase = Ticker::every(Duration::from_millis(1));
     loop {
-        // this does the really annoying bit of business updating the PWM channels based on the values in the modbus registers
-        // Done here because passing the timers around turns out to be a real pain.
-        // Yes this is a dogs dinner TODO FIXME.
-        // Set the frequency if that has changed
-        let mut duty_cycle1 = HREGISTER_DATA[0].load(core::sync::atomic::Ordering::Relaxed);
-        let mut frequency1 = HREGISTER_DATA[1].load(core::sync::atomic::Ordering::Relaxed);
-        if duty_cycle1 > DUTY_CYCLE_MAX {
-            duty_cycle1 = DUTY_CYCLE_MAX;
-        }
-        if frequency1 < 1 {
-            frequency1 = 1;
-        }
-        if frequency1 > FREQUENCY_MAX {
-            frequency1 = FREQUENCY_MAX;
-        }
-        if hz(frequency1 as u32) != pwm1.get_frequency() {
-            pwm1.set_frequency(hz(frequency1 as u32));
-            pwm1.ch1()
-                .set_duty_cycle_fraction(duty_cycle1 as u32, DUTY_CYCLE_MAX as u32);
-            old_dutycycles[0] = duty_cycle1;
-        }
-        if duty_cycle1 != old_dutycycles[0] {
-            pwm1.ch1()
-                .set_duty_cycle_fraction(duty_cycle1 as u32, DUTY_CYCLE_MAX as u32);
-            old_dutycycles[0] = duty_cycle1
-        }
-        // Switch on or off based on the coil state
-        if COIL_DATA[0].load(core::sync::atomic::Ordering::Relaxed) {
-            if !pwm1.ch1().is_enabled() {
-                pwm1.ch1().enable();
+        for i in 0..4 {
+            let period = HREGISTER_DATA[2 * i + 1].load(Relaxed);
+            let pulse = HREGISTER_DATA[2 * i].load(Relaxed);
+            let enable = COIL_DATA[i].load(Relaxed);
+            defmt::trace!(
+                "Counter {} period {}, duration {}, enabled {}",
+                i,
+                period,
+                pulse,
+                enable
+            );
+            if !enable {
+                // Ensure we get a pulse as soon as we write the enable coil even at low rates
+                counters[i] = 0;
             }
-        } else {
-            if pwm1.ch1().is_enabled() {
-                pwm1.ch1().disable();
+            counters[i] = counters[i].wrapping_add(1);
+            if counters[i] >= period {
+                counters[i] = 0;
+            }
+            if counters[i] < pulse && enable {
+                pwm_pins[i].set_high();
+            } else {
+                pwm_pins[i].set_low();
             }
         }
-
-        let mut duty_cycle2 = HREGISTER_DATA[2].load(core::sync::atomic::Ordering::Relaxed);
-        let mut frequency2 = HREGISTER_DATA[3].load(core::sync::atomic::Ordering::Relaxed);
-        if frequency2 < 1 {
-            frequency2 = 1;
+        // CPU run indicator blinky
+        led_tbase = led_tbase.wrapping_add(1);
+        if led_tbase == 100 {
+            led1.toggle(); // CPU Running indicator
+            led_tbase = 0;
         }
-        if frequency2 > FREQUENCY_MAX {
-            frequency2 = FREQUENCY_MAX;
-        }
-        if duty_cycle2 > DUTY_CYCLE_MAX {
-            duty_cycle2 = DUTY_CYCLE_MAX;
-        }
-        if hz(frequency2 as u32) != pwm2.get_frequency() {
-            pwm2.set_frequency(hz(frequency2 as u32));
-            pwm2.ch1()
-                .set_duty_cycle_fraction(duty_cycle2 as u32, DUTY_CYCLE_MAX as u32);
-            old_dutycycles[1] = duty_cycle2;
-        }
-        if duty_cycle2 != old_dutycycles[1] {
-            pwm2.ch1()
-                .set_duty_cycle_fraction(duty_cycle2 as u32, DUTY_CYCLE_MAX as u32);
-            old_dutycycles[1] = duty_cycle2;
-        }
-        // Switch on or off based on the coil state
-        if COIL_DATA[1].load(core::sync::atomic::Ordering::Relaxed) {
-            if !pwm2.ch1().is_enabled() {
-                pwm2.ch1().enable();
-            }
-        } else {
-            if pwm2.ch1().is_enabled() {
-                pwm2.ch1().disable();
-            }
-        }
-        let mut duty_cycle3 = HREGISTER_DATA[4].load(core::sync::atomic::Ordering::Relaxed);
-        let mut frequency3 = HREGISTER_DATA[5].load(core::sync::atomic::Ordering::Relaxed);
-        if frequency3 < 1 {
-            frequency3 = 1;
-        }
-        if frequency3 > FREQUENCY_MAX {
-            frequency3 = FREQUENCY_MAX;
-        }
-        if duty_cycle3 > DUTY_CYCLE_MAX {
-            duty_cycle3 = DUTY_CYCLE_MAX;
-        }
-        if hz(frequency3 as u32) != pwm3.get_frequency() {
-            pwm3.set_frequency(hz(frequency3 as u32));
-            pwm3.ch1()
-                .set_duty_cycle_fraction(duty_cycle3 as u32, DUTY_CYCLE_MAX as u32);
-            old_dutycycles[2] = duty_cycle3;
-        }
-        if duty_cycle3 != old_dutycycles[2] {
-            pwm3.ch1()
-                .set_duty_cycle_fraction(duty_cycle3 as u32, DUTY_CYCLE_MAX as u32);
-            old_dutycycles[2] = duty_cycle3;
-        }
-        // Switch on or off based on the coil state
-        if COIL_DATA[2].load(core::sync::atomic::Ordering::Relaxed) {
-            if !pwm3.ch1().is_enabled() {
-                pwm3.ch1().enable();
-            }
-        } else {
-            if pwm3.ch1().is_enabled() {
-                pwm3.ch1().disable();
-            }
-        }
-        led1.toggle(); // CPU Running indicator
-        Timer::after(Duration::from_millis(50)).await;
+        timebase.next().await;
     }
 }
 
