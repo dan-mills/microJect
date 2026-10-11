@@ -6,19 +6,16 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-embassy-stm32 = { version = "0.6.0", path = "../embassy/embassy-stm32", features = [ "time-driver-any", "unstable-pac", "stm32f030k6", "memory-x", "exti", "chrono", "defmt" ] }
-embassy-sync = { version = "0.8.0", path = "../embassy/embassy-sync", features = ["portable-atomic", "defmt"] }
-embassy-executor = { version = "0.10.0", path = "../embassy/embassy-executor", features = ["platform-cortex-m", "executor-thread","defmt"] }
-embassy-time = { version = "0.5.1", path = "../embassy/embassy-time", features = ["tick-hz-10_000","defmt" ] }
-embassy-embedded-hal = { version = "0.6.0", path = "../embassy/embassy-embedded-hal" }
-embassy-futures = { version = "0.1.2", path = "../embassy/embassy-futures" }
+embassy-stm32 = { version = "0.6.0", path = "../../embassy/embassy-stm32", features = [ "time-driver-any", "unstable-pac", "stm32f030k6", "memory-x", "exti", "chrono", "defmt" ] }
+embassy-sync = { version = "0.8.0", path = "../../embassy/embassy-sync", features = ["portable-atomic", "defmt"] }
+embassy-executor = { version = "0.10.0", path = "../../embassy/embassy-executor", features = ["platform-cortex-m", "executor-thread","defmt"] }
+embassy-time = { version = "0.5.1", path = "../../embassy/embassy-time", features = ["tick-hz-10_000","defmt" ] }
+embassy-embedded-hal = { version = "0.6.0", path = "../../embassy/embassy-embedded-hal" }
+embassy-futures = { version = "0.1.2", path = "../../embassy/embassy-futures" }
 embedded-io-async = { version = "0.7.0" }
 embedded-io = { version = "0.7.1" }
 portable-atomic = { version = "1.15.0", features = ["unsafe-assume-single-core"] }
 panic-halt = { version = "1.0.0" }
-#embassy-time-driver = {version = "0.2.2", path = "../embassy/embassy-time-driver"}
-#embassy-time-driver = { path = "../embassy/embassy-time-driver"}
-#systick-timer = { version = "0.2.3"}
 
 defmt = "1.0.1"
 defmt-rtt = "1.0.0"
@@ -32,7 +29,6 @@ embedded-hal-bus = { version = "0.1", features = ["async"] }
 heapless = { version = "0.9", default-features = false }
 chrono = { version = "^0.4", default-features = false }
 static_cell = "2"
-#micromath = "2.0.0"
 
 [profile.release]
 debug = 2
