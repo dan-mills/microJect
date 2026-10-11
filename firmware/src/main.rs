@@ -26,8 +26,7 @@ const INPUTS: usize = 2; // Two opto isolators.
 const IREGISTERS: usize = 2; // Two Analog inputs.
 const HREGISTERS: usize = 8; // Four pairs of PWM duration and frequency values.
 const DEFAULT_MODBUS_ADDRESS: u8 = 8;
-const SERVER_ID: &[u8] = b" microJect"; // No idea why this needs to be prefixed with a space,
-//something in the modbus packaging code is not quite right for this message, FIXME
+const SERVER_ID: &[u8] = b"microJect";
 
 // Aggravatingly Rust does not have the copy trait for atomic types so initialising statics is a pain in the arse.
 static COIL_DATA: [atomic::AtomicBool; COILS] = [
