@@ -23,8 +23,7 @@ enum ModbusState {
     RxData,
 }
 
-#[derive(Debug)]
-struct modbus_data {
+struct ModbusData {
     bytes_received: usize,
     serial_data: [u8; 256], // Max length per modbus spec, used for both input and output
     mute: bool,             // Are we in mute mode
@@ -36,13 +35,11 @@ struct modbus_data {
     bus_server_message_count: u16,
     server_no_response_count: u16,
     event_count: u16,
-    event_log: [u8; 64],
-    event_log_index: u8,
 }
 
-impl Default for modbus_data {
+impl Default for ModbusData {
     fn default() -> Self {
-        modbus_data {
+        ModbusData {
             bytes_received: 0,
             serial_data: [0u8; 256],
             mute: false,
@@ -54,12 +51,14 @@ impl Default for modbus_data {
             bus_server_message_count: 0,
             server_no_response_count: 0,
             event_count: 0,
-            event_log: [0u8; 64],
-            event_log_index: 0,
         }
     }
 }
-impl modbus_data {
+
+fn rd_16(source: &[u8]) -> u16 {
+    (source[0] as u16) << 8 | source[1] as u16
+}
+impl ModbusData {
     // reads a coil or discrete input from the appropriate data array and produces the appropriate response
     fn read_boolean(&mut self, data: &[AtomicBool]) -> Result<usize, u8> {
         defmt::trace!("Read Discrete Input or coil");
@@ -67,25 +66,26 @@ impl modbus_data {
             return Err(0); // Not really an error, but we shouldnt actually do anything
         }
         let payload = &mut self.serial_data[2..];
-        let start_address: u16 = (payload[0] as u16) << 8 | payload[1] as u16;
-        let num_inputs: u16 = (payload[2] as u16) << 8 | payload[3] as u16;
+        let start_address = rd_16(payload);
+        let num_inputs = rd_16(&payload[2..]);
         if num_inputs > 0x7d0 {
             return Err(3);
         }
         if (start_address + num_inputs) > data.len() as u16 {
             return Err(2);
         }
-        let payload_bytes = ((num_inputs + 7) / 8) as usize;
+        let payload_bytes = num_inputs.div_ceil(8) as usize;
         payload[0] = payload_bytes as u8;
         let mut coil_bits = 0;
         for i in 0..payload_bytes {
             payload[1 + i] = 0;
         }
         let mut address: usize = 0;
-        for i in 0..num_inputs as usize {
+        for (i, d) in data.iter().enumerate().take(num_inputs as usize) {
+            //for i in 0..num_inputs as usize {
             address = 1 + i / 8;
             let bit = 1 << (i % 8);
-            if data[i as usize].load(Relaxed) {
+            if d.load(Relaxed) {
                 coil_bits |= bit;
             }
             if (i % 8) == 7 {
@@ -103,8 +103,8 @@ impl modbus_data {
             return Err(0); // Not really an error, but we shouldnt actually do anything
         }
         let payload = &mut self.serial_data[2..];
-        let start_address: u16 = (payload[0] as u16) << 8 | payload[1] as u16;
-        let num_regs: u16 = (payload[2] as u16) << 8 | payload[3] as u16;
+        let start_address = rd_16(payload);
+        let num_regs = rd_16(&payload[2..]);
         defmt::trace!("Start address: {}", start_address);
         defmt::trace!("Number of registers: {}", num_regs);
         if num_regs > 0x7d {
@@ -132,8 +132,8 @@ impl modbus_data {
             return Err(0); // Not really an error, but we shouldnt actually do anything
         }
         let payload = &mut self.serial_data[2..];
-        let coil = (payload[0] as u16) << 8 | payload[1] as u16;
-        let value = (payload[2] as u16) << 8 | payload[3] as u16;
+        let coil = rd_16(payload);
+        let value = rd_16(&payload[2..]);
         if (value != 0xff00) && (value != 0x0000) {
             return Err(0x03);
         }
@@ -151,10 +151,10 @@ impl modbus_data {
             return Err(0); // Not really an error, but we shouldnt actually do anything
         }
         let payload = &mut self.serial_data[2..];
-        let coil = (payload[0] as u16) << 8 | payload[1] as u16;
-        let count = (payload[2] as u16) << 8 | payload[3] as u16;
+        let coil = rd_16(payload);
+        let count = rd_16(&payload[2..]);
         let bytes = payload[4];
-        if (count > 0x7b0) || (bytes as u16 != (count + 7) / 8) {
+        if (count > 0x7b0) || (bytes as u16 != count.div_ceil(8)) {
             return Err(0x03);
         }
         if (coil + count) > data.len() as u16 {
@@ -173,8 +173,8 @@ impl modbus_data {
             return Err(0); // Not really an error, but we shouldnt actually do anything
         }
         let payload = &mut self.serial_data[2..];
-        let register = (payload[0] as u16) << 8 | payload[1] as u16;
-        let value = (payload[2] as u16) << 8 | payload[3] as u16;
+        let register = rd_16(payload);
+        let value = rd_16(&payload[2..]);
         if register >= data.len() as u16 {
             return Err(0x02);
         }
@@ -188,8 +188,8 @@ impl modbus_data {
             return Err(0); // Not really an error, but we shouldnt actually do anything
         }
         let payload = &mut self.serial_data[2..];
-        let register = (payload[0] as u16) << 8 | payload[1] as u16;
-        let count = (payload[2] as u16) << 8 | payload[3] as u16;
+        let register = rd_16(payload);
+        let count = rd_16(&payload[2..]);
         let bytes = payload[4];
         if (count > 0x7b) || (bytes as u16 != 2 * count) {
             return Err(0x03);
@@ -198,8 +198,7 @@ impl modbus_data {
             return Err(0x02);
         }
         for i in 0..count {
-            let value =
-                (payload[(5 + 2 * i) as usize] as u16) << 8 | payload[(6 + 2 * i) as usize] as u16;
+            let value = rd_16(&payload[(5 + 2 * i) as usize..]);
             data[(register + i) as usize].store(value, Relaxed);
         }
         Ok(4)
@@ -246,7 +245,7 @@ impl modbus_data {
             data |= 0x20
         };
         payload[0] = data;
-        return Ok(1);
+        Ok(1)
     }
 
     fn read_pdu(&mut self) -> Result<usize, u8> {
@@ -296,15 +295,15 @@ impl modbus_data {
             location += text.len();
             oid += 1;
         }
-        return Ok(location);
+        Ok(location)
     }
 
     fn read_diagnostics(&mut self) -> Result<usize, u8> {
         defmt::trace!("Read diagnostics");
         let payload = &mut self.serial_data[2..];
-        let sub_function = (payload[0] as u16) << 8 | payload[1] as u16;
-        let data = (payload[2] as u16) << 8 | payload[3] as u16;
-        if (sub_function == 0x01) {
+        let sub_function = rd_16(payload);
+        //let data = rd_16(&payload[2..]);
+        if sub_function == 0x01 {
             // Special case because restart comms is a funny
             self.bus_message_count = 0;
             self.bus_comms_error_count = 0;
@@ -317,12 +316,9 @@ impl modbus_data {
                 self.mute = false;
                 return Err(0); // Clear the mute flag, but dont send a response
             } else {
-                if data == 0xff00 {
-                    // clear the event log
-                    self.event_log_index = 0;
-                }
+                // We dont actually have an event log
+                return Ok(self.bytes_received - 4);
             }
-            return Ok(self.bytes_received - 4);
         }
         if self.mute {
             return Err(0);
@@ -340,7 +336,7 @@ impl modbus_data {
             }
             0x000A => {
                 // Clear counters and diags register
-                self.bus_server_message_count;
+                self.bus_server_message_count = 0;
                 self.bus_comms_error_count = 0;
                 self.bus_exception_count = 0;
                 self.bus_message_count = 0;
@@ -441,7 +437,6 @@ pub async fn modbus_task(
     } else {
         (11 * 3_500_000 / baudrate, 11 * 1_500_000 / baudrate)
     };
-
     // split the UART buffer into tx and rx halves so we can have a DMA ring buffer on the rx side
     // stm32 uarts are pathetic.
     let mut dma_buffer = [0u8; UART_BUF_LEN];
@@ -450,7 +445,7 @@ pub async fn modbus_task(
     let mut rx_buffer = [0u8; 1];
     let mut state = ModbusState::WaitForIdle3_5;
     let mut serial_timeout = timeout3_5;
-    let mut modbus_data = modbus_data::default();
+    let mut modbus_data = ModbusData::default();
     let mut last_message = Instant::now();
 
     loop {
@@ -458,12 +453,6 @@ pub async fn modbus_task(
             .read(&mut rx_buffer)
             .with_timeout(Duration::from_micros(serial_timeout as u64))
             .await;
-        //        match rx_status {
-        //            Ok(_) => {
-        //                defmt::trace!("Received byte: {:?}", rx_buffer[0]);
-        //            }
-        //            Err(_) => {}
-        //        }
         if Instant::now() - last_message > TIMEOUT_IDLE {
             modbus_data_led.set_low();
             defmt::trace!("Modbus timeout");
@@ -504,10 +493,12 @@ pub async fn modbus_task(
                     Ok(_) => {
                         modbus_data.serial_data[0] = rx_buffer[0];
                         modbus_data.bytes_received += 1;
-                        modbus_data.bus_message_count += 1;
+                        modbus_data.bus_message_count =
+                            modbus_data.bus_message_count.saturating_add(1);
                         if (rx_buffer[0] == address) || (rx_buffer[0] == 0) {
                             // it is addressed to us
-                            modbus_data.bus_server_message_count += 1;
+                            modbus_data.bus_server_message_count =
+                                modbus_data.bus_server_message_count.saturating_add(1);
                             defmt::trace!("Address match {}", rx_buffer[0]);
                             modbus_data.broadcast = rx_buffer[0] == 0;
                             defmt::trace!("Modbus state changed to RxData");
@@ -539,8 +530,6 @@ pub async fn modbus_task(
                             defmt::debug!("Receive length overrun");
                             modbus_err_led.set_high();
                             state = ModbusState::WaitForIdle3_5;
-                            //modbus_data.bus_comms_error_count += 1;
-                            break;
                         }
                     }
                     Err(e) => {
@@ -557,51 +546,31 @@ pub async fn modbus_task(
                                 let crc = crc16(
                                     &modbus_data.serial_data[0..modbus_data.bytes_received - 2],
                                 );
-                                if (crc.1
-                                    == modbus_data.serial_data[modbus_data.bytes_received - 2])
-                                    && (crc.0
-                                        == modbus_data.serial_data[modbus_data.bytes_received - 1])
+                                if crc
+                                    == (
+                                        modbus_data.serial_data[modbus_data.bytes_received - 1],
+                                        modbus_data.serial_data[modbus_data.bytes_received - 2],
+                                    )
                                 {
                                     defmt::trace!("CRC OK");
                                     modbus_data_led.toggle();
                                     let opcode = modbus_data.serial_data[1];
-                                    let resultcode: Result<usize, u8>;
-                                    match opcode {
-                                        0x01 => resultcode = modbus_data.read_boolean(&COIL_DATA),
-                                        0x02 => resultcode = modbus_data.read_boolean(&INPUT_DATA),
-                                        0x03 => {
-                                            resultcode = modbus_data.read_register(&HREGISTER_DATA)
-                                        }
-                                        0x04 => {
-                                            resultcode = modbus_data.read_register(&IREGISTER_DATA)
-                                        }
-
-                                        0x05 => resultcode = modbus_data.write_coil(&COIL_DATA),
-
-                                        0x06 => {
-                                            resultcode = modbus_data.write_register(&HREGISTER_DATA)
-                                        }
-                                        0x07 => resultcode = modbus_data.read_exception_register(),
-                                        0x08 => resultcode = modbus_data.read_diagnostics(),
-                                        0x0b => resultcode = modbus_data.read_comm_event_counter(),
-
-                                        0x0f => resultcode = modbus_data.write_coils(&COIL_DATA),
-
-                                        0x10 => {
-                                            resultcode =
-                                                modbus_data.write_registers(&HREGISTER_DATA)
-                                        }
-
-                                        0x11 => {
-                                            resultcode = modbus_data.report_server_id(&SERVER_ID)
-                                        }
-                                        0x2b => resultcode = modbus_data.read_pdu(),
-
-                                        _ => {
-                                            // Unknown command
-                                            resultcode = Err(0x01)
-                                        }
-                                    }
+                                    let resultcode: Result<usize, u8> = match opcode {
+                                        0x01 => modbus_data.read_boolean(&COIL_DATA),
+                                        0x02 => modbus_data.read_boolean(&INPUT_DATA),
+                                        0x03 => modbus_data.read_register(&HREGISTER_DATA),
+                                        0x04 => modbus_data.read_register(&IREGISTER_DATA),
+                                        0x05 => modbus_data.write_coil(&COIL_DATA),
+                                        0x06 => modbus_data.write_register(&HREGISTER_DATA),
+                                        0x07 => modbus_data.read_exception_register(),
+                                        0x08 => modbus_data.read_diagnostics(),
+                                        0x0b => modbus_data.read_comm_event_counter(),
+                                        0x0f => modbus_data.write_coils(&COIL_DATA),
+                                        0x10 => modbus_data.write_registers(&HREGISTER_DATA),
+                                        0x11 => modbus_data.report_server_id(SERVER_ID),
+                                        0x2b => modbus_data.read_pdu(),
+                                        _ => Err(0x01),
+                                    };
                                     let response_bytes: usize; // Response length in bytes not including checksum, but including the address and opcode
                                     match resultcode {
                                         Ok(length) => {
@@ -609,7 +578,8 @@ pub async fn modbus_task(
                                             modbus_err_led.set_low();
                                             if opcode != 0x0b {
                                                 // Read comm event count does not increment this per the spec.
-                                                modbus_data.event_count += 1;
+                                                modbus_data.event_count =
+                                                    modbus_data.event_count.saturating_sub(1);
                                             }
                                         }
                                         Err(code) => {
@@ -621,8 +591,7 @@ pub async fn modbus_task(
                                             modbus_err_led.set_high();
                                         }
                                     }
-                                    let crc =
-                                        crc16(&modbus_data.serial_data[..response_bytes as usize]);
+                                    let crc = crc16(&modbus_data.serial_data[..response_bytes]);
                                     modbus_data.serial_data[response_bytes] = crc.1;
                                     modbus_data.serial_data[response_bytes + 1] = crc.0;
                                     defmt::trace!(
@@ -639,16 +608,19 @@ pub async fn modbus_task(
                                             .await
                                             .ok();
                                     } else {
-                                        modbus_data.server_no_response_count += 1;
+                                        modbus_data.server_no_response_count =
+                                            modbus_data.server_no_response_count.saturating_add(1);
                                     }
                                 } else {
                                     defmt::debug!("CRC fail");
-                                    modbus_data.bus_comms_error_count += 1;
+                                    modbus_data.bus_comms_error_count =
+                                        modbus_data.bus_comms_error_count.saturating_add(1);
                                     modbus_err_led.set_high();
                                     defmt::trace!("Modbus state changed to Wait for Idle3_5");
                                 }
                             } else {
-                                modbus_data.bus_comms_error_count += 1;
+                                modbus_data.bus_comms_error_count =
+                                    modbus_data.bus_comms_error_count.saturating_add(1);
                                 // Messgae too short
                             }
                             modbus_data.bytes_received = 0;
