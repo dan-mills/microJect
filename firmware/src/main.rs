@@ -90,7 +90,6 @@ async fn input_read(
     let opto0 = Input::new(opto_pin0, Pull::Up);
     let opto1 = Input::new(opto_pin1, Pull::Up);
     let mut measurements = [0u16; DMA_BUF_LEN / 2];
-    //    defmt::trace!("Starting ADC and switch input loop");
     let mut ticker = Ticker::every(Duration::from_millis(50));
     loop {
         match ring_buffered_adc.read(&mut measurements).await {
@@ -118,10 +117,12 @@ async fn input_read(
             // Switch on the PWM based on the isolated inputs
             COIL_DATA[0].store(opto0.is_low(), core::sync::atomic::Ordering::Relaxed);
             COIL_DATA[1].store(opto1.is_low(), core::sync::atomic::Ordering::Relaxed);
-            HREGISTER_DATA[0].store(IREGISTER_DATA[0].load(Relaxed) / 65, Relaxed); // CH0 Duty cycle
-            HREGISTER_DATA[2].store(IREGISTER_DATA[0].load(Relaxed) / 65, Relaxed); // CH1 Duty cycle
-            HREGISTER_DATA[1].store(IREGISTER_DATA[1].load(Relaxed) / 650, Relaxed); // CH0 Frequency
-            HREGISTER_DATA[3].store(IREGISTER_DATA[1].load(Relaxed) / 650, Relaxed); // CH1 Frequency
+            // On times have defaulted to 1ms, so varying the period varies the flow rate
+            // Make the pots read the expected way around, more voltage increases the flow
+            let pot1 = 1000 - ((IREGISTER_DATA[0].load(Relaxed) / 65).clamp(0, 999));
+            let pot2 = 1000 - ((IREGISTER_DATA[1].load(Relaxed) / 65).clamp(0, 999));
+            HREGISTER_DATA[1].store(pot1, Relaxed); // CH0 period
+            HREGISTER_DATA[3].store(pot2, Relaxed); // CH1 period
         }
         // This chip is stupid, you cannot get the ADC to run slowly enough to avoid bogging down everything else
         // so stop it, wait a bit and then kick it off again, bit inefficient because we wake up, kick off the adc conversion and then sleep again
